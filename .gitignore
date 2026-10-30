@@ -1,0 +1,12 @@
+# install.sh 在本目录运行时生成的产物
+# 其中 config.yaml / client.yaml 含密码，client-uri.txt 含完整凭据，都不要提交
+/config.yaml
+/config.yaml.bak.*
+/client.yaml
+/client-uri.txt
+/certs/
+/hysteria
+/run.sh
+/hysteria.log*
+/*.pid
+/*.child
