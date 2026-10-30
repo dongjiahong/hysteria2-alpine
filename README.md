@@ -1,13 +1,12 @@
 # Hysteria 2 一键部署
 
-面向「Alpine 容器 / 64MB 内存 / TCP 全被封、只剩 UDP / 没有 systemd」场景的 Hysteria 2 服务端部署脚本。
+给「Alpine 小内存服务器 / TCP 全被封只剩 UDP / 没有 systemd」用的一键部署脚本。
 
-不编译任何东西，直接取官方静态二进制；把运行内存压进 64MB；崩溃自动拉起；顺带生成客户端配置。
+在服务器上跑一条命令：自动下载官方静态二进制、生成 64MB 档位配置、自签证书、进程守护脚本和客户端配置。不编译任何东西。
 
 ```sh
-git clone https://github.com/dongjiahong/hysteria2-alpine.git
-docker cp hysteria2-alpine/install.sh <容器>:/tmp/
-docker exec -it <容器> sh /tmp/install.sh --port 443 --start
+wget -O /tmp/install.sh https://raw.githubusercontent.com/dongjiahong/hysteria2-alpine/main/install.sh
+sh /tmp/install.sh --port 443 --start
 ```
 
 ---
@@ -16,11 +15,11 @@ docker exec -it <容器> sh /tmp/install.sh --port 443 --start
 
 | | |
 | :-- | :-- |
-| 不编译 | 官方 Go 静态单文件，Alpine 直接跑，容器内存只受运行影响 |
+| 不编译 | 取官方 Go 静态单文件，Alpine 直接跑，编译才吃内存，下载不吃 |
 | 64MB 可用 | QUIC 窗口压到 1MB/2.5MB + `GOMEMLIMIT=32MiB`，实测 8 并发峰值 21.5 MiB |
-| 无 systemd | 自带 `run.sh` 守护，崩溃 3 秒拉起，`setsid` 脱离会话 |
+| 无需 systemd | 自带 `run.sh` 守护，崩溃 3 秒拉起，`setsid` 脱离 SSH 会话 |
 | 默认零域名暴露 | 自签证书 + salamander 混淆，SNI 与 QUIC 指纹不上线路 |
-| 抗中间人 | 下载走 `hashes.txt` 做 sha256 校验，多镜像自动回退 |
+| 防中间人 | 下载走 `hashes.txt` 做 sha256 校验，多镜像自动回退 |
 | 一键出客户端 | 生成 `client.yaml`、`hysteria2://` 链接、证书指纹 |
 
 ---
@@ -41,42 +40,53 @@ docker exec -it <容器> sh /tmp/install.sh --port 443 --start
 
 ## 环境要求
 
-- Linux 容器，Alpine 优先（脚本只依赖 POSIX sh 和 busybox applet）
+- Alpine Linux（脚本只依赖 POSIX sh 和 busybox applet，不需要 bash、不需要 Python）
 - 内存 64MB 起，128MB 以上更从容
 - **UDP 端口必须在安全组 / 防火墙上放行，TCP 不用开**
 - 架构支持：`amd64` `arm64` `arm` `armv5` `386` `mipsle` `riscv64` `loong64` `s390x`
+- 有 `root` 权限（监听 443 需要）
 
-宿主机没有 OpenRC 或 systemd 都可以，脚本不依赖 init 系统。
+不依赖 systemd 或 OpenRC，有没有 init 都能跑。
 
 ---
 
 ## 安装
 
-### 1. 获取脚本
+### 1. 登录服务器
 
 ```sh
-git clone https://github.com/dongjiahong/hysteria2-alpine.git
+ssh root@<服务器IP>
 ```
 
-只要脚本的话：
+### 2. 下载脚本
+
+服务器能访问 GitHub：
 
 ```sh
+wget -O /tmp/install.sh https://raw.githubusercontent.com/dongjiahong/hysteria2-alpine/main/install.sh
+```
+
+没有 `wget` 就用 `curl`（两者任选，busybox 自带 `wget`）：
+
+```sh
+curl -fsSL -o /tmp/install.sh https://raw.githubusercontent.com/dongjiahong/hysteria2-alpine/main/install.sh
+```
+
+服务器连不上 GitHub，就在本地下好再传上去：
+
+```sh
+# 本地执行
 curl -fsSLO https://raw.githubusercontent.com/dongjiahong/hysteria2-alpine/main/install.sh
-```
-
-### 2. 把脚本送进容器
-
-```sh
-docker cp install.sh <容器名>:/tmp/
+scp install.sh root@<服务器IP>:/tmp/
 ```
 
 ### 3. 运行
 
 ```sh
-docker exec -it <容器名> sh /tmp/install.sh --port 443 --start
+sh /tmp/install.sh --port 443 --start
 ```
 
-装完会打印这样的信息，**认证密码和混淆密码都记下来**：
+装完会打印这些，**认证密码和混淆密码都记下来**：
 
 ```
 ================ 部署完成 ================
@@ -89,7 +99,9 @@ docker exec -it <容器名> sh /tmp/install.sh --port 443 --start
 证书 pin   : 85F9AC58...
 ```
 
-密码也随时可以用 `run.sh show` 再查，不用怕丢。
+密码随时可以用 `/opt/hysteria/run.sh show` 再查，不用怕丢。
+
+> **先确认一件事**：`/opt` 在服务器重启后会不会被清空。如果这台机器是别人给的容器、目录不持久，重启后要重跑一次安装脚本（一条命令，很快）。不确定就先写个笔记记下密码，或者用 `APP_DIR=/root/hysteria` 装到别的位置。
 
 ### 4. 参数
 
@@ -123,20 +135,22 @@ docker exec -it <容器名> sh /tmp/install.sh --port 443 --start
 | `hysteria.log` | 日志，超过 5MB 自动滚动一次 |
 | `hysteria.pid` / `hysteria.child` | 守护进程 / 子进程 PID |
 
-### 6. 容器没出站网络怎么办
+### 6. 服务器连不上 GitHub 怎么办
 
-下载失败时，在能上网的机器上取好二进制再送进去：
+脚本的下载失败时，在本地取好二进制再传上去：
 
 ```sh
-# Mac 上
+# 本地（Mac / Linux）
 curl -LO https://github.com/HyNetworks/hysteria/releases/download/app/v2.13.0/hysteria-linux-amd64
-docker cp hysteria-linux-amd64 <容器名>:/tmp/
+scp hysteria-linux-amd64 root@<服务器IP>:/tmp/
 
-# 容器内
+# 服务器上
 sh /tmp/install.sh --binary /tmp/hysteria-linux-amd64 --port 443 --start
 ```
 
-官方仓库已从 `apernet/hysteria` 迁到 `HyNetworks/hysteria`，老链接会 301 跳转。
+按服务器架构换资产名：`amd64` / `arm64` / `arm` / `386` 等，用 `uname -m` 确认。
+
+> 官方仓库已从 `apernet/hysteria` 迁到 `HyNetworks/hysteria`，老链接会 301 跳转。
 
 ---
 
@@ -169,8 +183,11 @@ sh /tmp/install.sh --binary /tmp/hysteria-linux-amd64 --port 443 --start
 
 会打印三样东西：`client.yaml` 内容、`hysteria2://` 链接、证书 `pinSHA256`。
 
+取回本地：
+
 ```sh
-docker cp <容器名>:/opt/hysteria/client.yaml .
+# 本地执行
+scp root@<服务器IP>:/opt/hysteria/client.yaml .
 ```
 
 `client.yaml` 长这样：
@@ -238,31 +255,40 @@ connected to server  {"addr": "1.2.3.4:443", "udpEnabled": true, ...}
 /opt/hysteria/run.sh log        # tail -f
 /opt/hysteria/run.sh show       # 客户端配置 + 链接 + 证书指纹
 /opt/hysteria/run.sh check      # 只验配置能否启动，3 秒后自动关闭
-/opt/hysteria/run.sh run        # 前台运行（容器入口用）
+/opt/hysteria/run.sh run        # 前台运行（交给外部 supervisor 时用）
 ```
 
 `status` 的退出码：`0` 运行中，`3` 未运行，适合放进检查脚本。
 
-### 让容器重启后自动拉起
+### 开机 / 重启后自动拉起
 
-最省事的做法是把 `run.sh run` 设为容器入口，不需要装任何 init：
+先看这台机器有什么 init：
 
 ```sh
-docker run -d --name hy2 --restart=always \
-  -p 443:443/udp \
-  -v /srv/hy2:/opt/hysteria \
-  <镜像> /opt/hysteria/run.sh run
+ps -p 1 -o comm=
 ```
 
-容器启动命令改不了的话，就手动 `run.sh start`。进程是 `setsid` 出去的，断开 `docker exec` 会话不会被 SIGHUP 带走。
-
-宿主机是带 OpenRC 的 Alpine 时：
+**输出是 `init` 或 `openrc-init`（绝大多数 Alpine VPS）：**
 
 ```sh
 echo '/opt/hysteria/run.sh start' > /etc/local.d/hysteria.start
 chmod +x /etc/local.d/hysteria.start
 rc-update add local default
 ```
+
+**输出是别的东西（纯容器，没有 init）：**
+
+用 cron 每分钟检查一次，发现挂了就拉起来。这一招对没有 init 的环境最稳：
+
+```sh
+echo '* * * * * /opt/hysteria/run.sh status >/dev/null 2>&1 || /opt/hysteria/run.sh start' \
+  >> /var/spool/cron/crontabs/root
+rc-service crond start 2>/dev/null || crond -b 2>/dev/null || true
+```
+
+提供服务的一方如果有面板或启动脚本，把 `/opt/hysteria/run.sh start` 加进去最省事。
+
+> `run.sh start` 用 `setsid` 把进程脱离当前会话，所以 SSH 断开不会把它带走。但要记住：**进程活着 ≠ 机器重启后还在**，重启后必须靠上面任一方式拉起。
 
 ### 崩溃与 OOM 后的行为
 
@@ -275,12 +301,18 @@ rc-update add local default
 dmesg -T | grep -i -E 'killed process|out of memory'
 ```
 
+容器里看不到 `dmesg` 时，直接看 RSS 增长：
+
+```sh
+/opt/hysteria/run.sh status
+```
+
 真被 OOM 了，按这个顺序处理：
 
 1. `GOMEMLIMIT` 从 `32MiB` 降到 `24MiB`（改 `run.sh` 顶部）
 2. QUIC 窗口再压一档：`1048576` → `524288`，`2621440` → `1310720`
 3. 降低并发：`maxIncomingStreams: 64` → `32`
-4. 实在不够就换 128MB 容器
+4. 实在不够就换 128MB 以上的套餐
 
 ### 改端口
 
@@ -316,8 +348,14 @@ sed -i 's/^  password: .*/  password: 新密码/' /opt/hysteria/config.yaml
 cp 新的cert.pem /opt/hysteria/certs/cert.pem
 cp 新的key.pem  /opt/hysteria/certs/key.pem
 chmod 600 /opt/hysteria/certs/key.pem
-# 重要：如果原来用的是自签证书，config.yaml 里有 sniGuard: disable，换成真证书后要删掉这一行
+# 重要：原来用自签证书时 config.yaml 里有 sniGuard: disable，换成真证书后要删掉这一行
 /opt/hysteria/run.sh restart
+```
+
+证书在本地签好后传上去：
+
+```sh
+scp cert.pem key.pem root@<服务器IP>:/tmp/
 ```
 
 ### 升级
@@ -326,7 +364,7 @@ chmod 600 /opt/hysteria/certs/key.pem
 
 ```sh
 /opt/hysteria/run.sh stop
-curl -fsSL -o /opt/hysteria/hysteria \
+wget -O /opt/hysteria/hysteria \
   https://github.com/HyNetworks/hysteria/releases/download/app/v2.13.0/hysteria-linux-amd64
 chmod +x /opt/hysteria/hysteria
 /opt/hysteria/run.sh start
@@ -337,7 +375,7 @@ chmod +x /opt/hysteria/hysteria
 
 ```sh
 /opt/hysteria/run.sh stop
-sh /tmp/install.sh --binary /tmp/hysteria-linux-amd64
+sh /tmp/install.sh
 /opt/hysteria/run.sh start
 ```
 
@@ -346,12 +384,19 @@ sh /tmp/install.sh --binary /tmp/hysteria-linux-amd64
 ### 备份与恢复
 
 ```sh
-# 备份（配置 + 证书 + 客户端配置）
-docker cp <容器名>:/opt/hysteria ./hy2-backup
+# 备份（配置 + 证书 + 客户端配置，不含二进制和日志）
+tar czf /root/hy2-backup-$(date +%Y%m%d).tar.gz \
+  -C /opt/hysteria config.yaml certs client.yaml client-uri.txt
 
-# 恢复
-docker cp ./hy2-backup/. <容器名>:/opt/hysteria/
-docker exec <容器名> /opt/hysteria/run.sh start
+# 传回本地保存
+scp root@<服务器IP>:/root/hy2-backup-*.tar.gz .
+```
+
+恢复：
+
+```sh
+tar xzf /root/hy2-backup-20261030.tar.gz -C /opt/hysteria
+/opt/hysteria/run.sh restart
 ```
 
 升级、改端口、换证书前都建议先备份一次。
@@ -376,7 +421,7 @@ docker exec <容器名> /opt/hysteria/run.sh start
 | 旋钮 | 默认 | 本脚本 | 作用 |
 | :-- | :-- | :-- | :-- |
 | `quic.*ReceiveWindow` | stream 8MB / conn 20MB | **1MB / 2.5MB** | 直接决定并发内存 |
-| `GOMEMLIMIT` | 无 | **32MiB** + `GOGC=50` | Go 堆软上限，到线多 GC 而不是撑爆容器 |
+| `GOMEMLIMIT` | 无 | **32MiB** + `GOGC=50` | Go 堆软上限，到线多 GC 而不是撑爆内存 |
 | `GOMAXPROCS` | 核数 | **1** | 少一套 per-P 缓存 |
 | `ignoreClientBandwidth` | false | **true** | 不按客户端声称带宽堆 Brutal 缓冲，统一走 BBR 保守档 |
 
@@ -423,19 +468,17 @@ Linux amd64 通常比 macOS 高 10~30%，按 **30 MiB 左右**估算是安全的
 
 ### 用真证书（伪装成正常 HTTP/3 站点）
 
-**别在 64MB 容器里跑内置 ACME**，签发时会额外吃内存，正好卡在最脆弱的启动时刻。在宿主机或本地用 `acme.sh` 走 Cloudflare DNS-01 签发，不需要开放 80/443 TCP：
+**别在 64MB 机器上跑内置 ACME**，签发时会额外吃内存，正好卡在最脆弱的启动时刻。在本地用 `acme.sh` 走 Cloudflare DNS-01 签发，不需要开放 80/443 TCP：
 
 ```sh
-# 在 Mac 或宿主机上
+# 本地执行
 export CF_Token=你的CF_API_Token
 acme.sh --issue --dns dns_cf -d hy2.example.com --server letsencrypt
 acme.sh --install-cert -d hy2.example.com \
   --key-file /tmp/key.pem --fullchain-file /tmp/cert.pem
 
-docker cp /tmp/cert.pem <容器>:/tmp/
-docker cp /tmp/key.pem  <容器>:/tmp/
-
-docker exec <容器> sh /tmp/install.sh \
+scp /tmp/cert.pem /tmp/key.pem root@<服务器IP>:/tmp/
+ssh root@<服务器IP> sh /tmp/install.sh \
   --cert /tmp/cert.pem --key /tmp/key.pem --sni hy2.example.com
 ```
 
@@ -474,15 +517,19 @@ masquerade:
 /opt/hysteria/run.sh check
 ```
 
-它会启动一次并打印具体报错。
+它会启动一次并打印具体报错。注意 `check` 会绑定同一个端口，**服务在跑时要先 `stop`**，否则报端口占用。
 
 **能连但速度上不去**
 
 1MB 窗口在 200ms RTT 下的物理上限约 40 Mbps。内存允许就放大窗口；另外 UDP 443 在某些线路上会被单独 QoS 限速，换 `8443` / `2053` / `2087` 试试，往往比调窗口有效。
 
+**`wget` 下载脚本失败**
+
+服务器连不上 GitHub。在本地下好 `scp` 上去，见 [服务器连不上 GitHub 怎么办](#6-服务器连不上-github-怎么办)。
+
 **`apk add` 失败**
 
-容器没有可用软件源。用 `--binary` 装二进制，证书用 `--cert/--key` 从外部带入。
+没有可用软件源。用 `--binary` 装二进制，证书用 `--cert/--key` 从外部带入。
 
 **重装后客户端连不上**
 
@@ -492,9 +539,13 @@ masquerade:
 
 看日志末尾。如果是「连续 3 次启动即退出」，说明是配置或端口问题，`run.sh check` 能看到原因。
 
+**重启服务器后连不上了**
+
+进程没自启。见 [开机 / 重启后自动拉起](#开机--重启后自动拉起)。
+
 **能不能和 xray-lite 共存**
 
-可以，但 64MB 容器里同时跑两个不划算（hy2 常驻约 20MB，[xray-lite](https://github.com/dongjiahong/xray-lite) 从 43MB 起）。TCP 被封干净时只留 hy2 更省心。
+可以，但 64MB 里同时跑两个不划算（hy2 常驻约 20MB，[xray-lite](https://github.com/dongjiahong/xray-lite) 从 43MB 起）。TCP 被封干净时只留 hy2 更省心。
 
 ---
 
@@ -505,10 +556,11 @@ masquerade:
 rm -rf /opt/hysteria
 ```
 
-容器里如果加了 OpenRC 自启项，一并删掉：
+如果加过自启项，一并删掉：
 
 ```sh
-rm -f /etc/local.d/hysteria.start
+rm -f /etc/local.d/hysteria.start /etc/local.d/hysteria.start.bak
+sed -i '/hysteria/d' /var/spool/cron/crontabs/root
 ```
 
 ---
@@ -516,9 +568,9 @@ rm -f /etc/local.d/hysteria.start
 ## 说明
 
 - 服务端版本默认 `v2.13.0`，配置字段以 [Hysteria 2 官方文档](https://v2.hysteria.network/) 为准
-- 脚本只依赖 POSIX sh 与 busybox applet，已在 macOS 的 `sh` 和 `dash`（POSIX 严格模式）下跑通完整流程；**尚未在真实 Alpine 容器内验证**（开发机没有 Docker），首次部署请留意 `install.sh` 的前两步输出
-- busybox 特有差异已做 fallback：无 `curl` 用 `wget`，无 `sha256sum` 用 `shasum` 或 `openssl`，无 `setsid` 用 `nohup`
-- `config.yaml` 含密码，权限为 `0644`；多用户容器里建议 `chmod 600`
+- 脚本只依赖 POSIX sh 与 busybox applet，已在 macOS 的 `sh` 和 `dash`（POSIX 严格模式）下跑通完整流程；**尚未在真实 Alpine 机器上验证**，首次部署请留意前两步输出
+- busybox 差异已做 fallback：无 `curl` 用 `wget`，无 `sha256sum` 用 `shasum` 或 `openssl`，无 `setsid` 用 `nohup`
+- `config.yaml` 含密码，权限为 `0644`；多用户机器上建议 `chmod 600`
 
 ---
 

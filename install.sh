@@ -379,7 +379,7 @@ case "${1:-}" in
         fi
         rotate
         rm -f "$PIDFILE"
-        # setsid：脱离当前会话，docker exec 断开会话时不会被 SIGHUP 带走
+        # setsid：脱离当前会话，SSH 断开时不会被 SIGHUP 带走
         if command -v setsid >/dev/null 2>&1; then
             nohup setsid "$0" run >>"$LOGFILE" 2>&1 &
         else
