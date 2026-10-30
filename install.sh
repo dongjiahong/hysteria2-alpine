@@ -205,13 +205,16 @@ https://hub.gitmirror.com/https://github.com"
     [ "$got" -eq 1 ] || die "所有源都下载失败。请在能上网的机器上取 $ASSET 后用 --binary 传进来"
 
     # 校验（拿不到 hashes.txt 就跳过，不阻塞部署）
+    # hashes.txt 里的路径带 build/ 前缀，必须按 basename 比对，否则会静默跳过校验
     if fetch "https://github.com/HyNetworks/hysteria/releases/download/app/v$VERSION/hashes.txt" \
             "$TMP/hashes.txt" 2>/dev/null; then
-        want=$(awk -v a="$ASSET" '{n=$2; sub(/^\*/,"",n); if (n==a) {print $1; exit}}' "$TMP/hashes.txt")
+        want=$(awk -v a="$ASSET" '{n=$2; sub(/^\*/,"",n); sub(/^.*\//,"",n); if (n==a) {print $1; exit}}' "$TMP/hashes.txt")
         if [ -n "$want" ]; then
             actual=$(sha256_of "$TMP/$ASSET")
             [ "$want" = "$actual" ] || die "sha256 不匹配（期望 ${want}，实际 ${actual}），文件可能被中间人改过"
             say "sha256 校验通过"
+        else
+            warn "hashes.txt 里没有 $ASSET，本次跳过校验"
         fi
     else
         warn "拿不到 hashes.txt，跳过校验"
