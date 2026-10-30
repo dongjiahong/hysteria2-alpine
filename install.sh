@@ -97,6 +97,29 @@ mem_limit() {
         awk '/^MemTotal:/ {print $2 * 1024}' /proc/meminfo 2>/dev/null || echo unknown
     fi
 }
+
+# 非 root 的 PATH 常缺 /usr/sbin，PATH 找不到就查常见目录
+find_exe() {
+    p=$(command -v "$1" 2>/dev/null) && { printf '%s\n' "$p"; return 0; }
+    for d in /usr/sbin /sbin /usr/bin /bin /usr/local/sbin /usr/local/bin; do
+        [ -x "$d/$1" ] && { printf '%s\n' "$d/$1"; return 0; }
+    done
+    return 1
+}
+
+# UDP 端口占用检测：拿不到就跳过，不阻塞安装
+# ss 的本地地址在第 5 列，netstat 在第 4 列；Linux 用 ":"、BSD/macOS 用 "." 分隔
+port_busy() {
+    if b=$(find_exe ss); then
+        "$b" -lun 2>/dev/null | awk -v p="$1" '$4 ~ ("[.:]" p "$") || $5 ~ ("[.:]" p "$") {f=1} END {exit !f}'
+    elif b=$(find_exe lsof); then
+        "$b" -nP -iUDP:"$1" >/dev/null 2>&1
+    elif b=$(find_exe netstat); then
+        "$b" -lun 2>/dev/null | awk -v p="$1" '$4 ~ ("[.:]" p "$") || $5 ~ ("[.:]" p "$") {f=1} END {exit !f}'
+    else
+        return 1
+    fi
+}
 MEM=$(mem_limit)
 case "$MEM" in
     ''|unknown|max|*[!0-9]*) MEMTXT="未检测到（未设 cgroup 上限）" ;;
@@ -107,6 +130,18 @@ case "$MEM" in
        fi ;;
 esac
 say "架构 ${ARCH} / 版本 ${VERSION} / 内存上限 ${MEMTXT}"
+
+# 首次安装才做端口预检；重装时端口多半被自己在用，会误报
+if [ ! -f "$APP_DIR/config.yaml" ] && port_busy "$PORT"; then
+    [ "$PORT" = "8443" ] && SUG=2053 || SUG=8443
+    die "udp/${PORT} 已被其他进程占用，换个端口重试（--port ${SUG}），或先停掉占用者"
+fi
+
+# 443 之外只会给出提示，不阻止——VPS 允许哪些端口只有提供方知道
+case "$PORT" in
+    443) : ;;
+    *)   say "使用非标准端口 udp/${PORT}：记得在安全组/防火墙放行 UDP ${PORT}，TCP 不用开" ;;
+esac
 
 # ---------------------------------------------------------------- 2. 取二进制
 say "2/6 准备二进制"

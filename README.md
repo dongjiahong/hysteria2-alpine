@@ -6,8 +6,10 @@
 
 ```sh
 wget -O /tmp/install.sh https://raw.githubusercontent.com/dongjiahong/hysteria2-alpine/main/install.sh
-sh /tmp/install.sh --port 443 --start
+sh /tmp/install.sh --port 8443 --start
 ```
+
+端口随便挑一个 **UDP** 端口，只要 VPS 允许且安全组放行。`443` 被占或不让用时，`8443` 是好选择，见 [端口怎么选](#端口怎么选)。
 
 ---
 
@@ -27,6 +29,7 @@ sh /tmp/install.sh --port 443 --start
 ## 目录
 
 - [环境要求](#环境要求)
+- [端口怎么选](#端口怎么选)
 - [安装](#安装)
 - [使用](#使用)
 - [运维](#运维)
@@ -42,11 +45,72 @@ sh /tmp/install.sh --port 443 --start
 
 - Alpine Linux（脚本只依赖 POSIX sh 和 busybox applet，不需要 bash、不需要 Python）
 - 内存 64MB 起，128MB 以上更从容
-- **UDP 端口必须在安全组 / 防火墙上放行，TCP 不用开**
+- **一个 UDP 端口必须在安全组 / 防火墙上放行，TCP 不用开**
 - 架构支持：`amd64` `arm64` `arm` `armv5` `386` `mipsle` `riscv64` `loong64` `s390x`
-- 有 `root` 权限（监听 443 需要）
+- 有 `root` 权限（装到 `/opt` 需要；监听 `1024` 以下的端口也需要，`8443` 这类高位端口不需要）
 
 不依赖 systemd 或 OpenRC，有没有 init 都能跑。
+
+---
+
+## 端口怎么选
+
+先分清三件事，它们的端口互不相干：
+
+| | 需要开放端口吗 | 说明 |
+| :-- | :-- | :-- |
+| **客户端**（你的 Mac / 手机） | **不需要** | hy2 客户端是主动出站连接，只在本机 `127.0.0.1:1080` 起个本地代理，不占对外端口 |
+| **服务器** | 需要 **1 个 UDP 端口** | 要安全组 / 防火墙放行；VPS 提供方也可能限制可用端口 |
+| **Cloudflare** | 与 hy2 无关 | CF 只代理 HTTP/HTTPS（TCP），**不转发 UDP** |
+
+> **别被「CF 的 8443」带偏**：8443、2053、2083、2087、2096 这串端口是 Cloudflare 代理 HTTPS 用的（TCP）。hy2 是纯 UDP，流量不可能走 CF 代理，你连的永远是 `VPS_IP:端口` 的 UDP，CF 最多当个 DNS（灰云）。
+>
+> 不过这几个端口号本身**值得优先试**——它们上面跑着大量正常 HTTPS 流量，不容易被针对性封锁。用就行，只是记住那是你 VPS 的 UDP 端口。
+
+### 推荐顺序
+
+| 端口 | 说明 |
+| :-- | :-- |
+| `8443` | 首选。替代 HTTPS 端口，常见且不刺眼 |
+| `2053` / `2083` / `2087` / `2096` | CF 支持的同款端口，适合脚本被拦时换着试 |
+| `443` | 最像正常 QUIC，但部分网络对 UDP 443 单独限速 |
+| `20000-50000` 之间的高位端口 | 避开扫描和 QoS，但有的网络限制高位 UDP |
+
+避开 `53`（DNS，可能被劫持/限速）、`123`（NTP）、`5060`（SIP）、以及提供方明确封禁的端口。
+
+### 换端口
+
+```sh
+sh /tmp/install.sh --port 8443 --start
+```
+
+改端口后要同步三处：**安全组 / 防火墙放行 UDP 新端口**、客户端配置里的端口、分享链接里的端口。脚本生成的 `client.yaml` 和链接会自动用新端口。
+
+装完之后改也可以，不用重装：
+
+```sh
+sed -i 's/^listen: .*/listen: :2053/' /opt/hysteria/config.yaml
+/opt/hysteria/run.sh restart
+```
+
+### 验证端口是否真的通了
+
+UDP 没有 TCP 那种"握手成功"的概念，`telnet` / `nc -z` 都测不出来，只能靠应用层确认：
+
+```sh
+# 1. 服务器上确认进程在跑
+/opt/hysteria/run.sh status
+
+# 2. 日志里确认监听地址和端口正确
+/opt/hysteria/run.sh log | grep "server up and running"
+# 应看到 {"listen": ":8443"}
+```
+
+3. 真正能证明"通了"的只有客户端日志里的 `connected to server`。
+
+所以顺序是：先确认服务在跑、端口对，再用客户端连。**一直超时的话先换端口试，别急着改配置**——端口被拦、密码错、混淆密码错，这三者表现完全一样。
+
+安全组没放行时，服务端日志里连一个连接记录都不会有，这是最典型的症状。
 
 ---
 
@@ -89,7 +153,7 @@ scp install.sh root@<服务器IP>:/tmp/
 ### 3. 运行
 
 ```sh
-sh /tmp/install.sh --port 443 --start
+sh /tmp/install.sh --port 8443 --start
 ```
 
 装完会打印这些，**认证密码和混淆密码都记下来**：
@@ -99,7 +163,7 @@ sh /tmp/install.sh --port 443 --start
 安装目录   : /opt/hysteria
 服务端配置 : /opt/hysteria/config.yaml
 证书       : /opt/hysteria/certs/  (自签)
-监听       : udp/443
+监听       : udp/8443
 认证密码   : xxxxxxxxxxxxxxxxxxxxxxxx
 混淆密码   : yyyyyyyyyyyyyyyyyyyyyyyy
 证书 pin   : 85F9AC58...
@@ -151,7 +215,7 @@ curl -LO https://github.com/HyNetworks/hysteria/releases/download/app/v2.13.0/hy
 scp hysteria-linux-amd64 root@<服务器IP>:/tmp/
 
 # 服务器上
-sh /tmp/install.sh --binary /tmp/hysteria-linux-amd64 --port 443 --start
+sh /tmp/install.sh --binary /tmp/hysteria-linux-amd64 --port 8443 --start
 ```
 
 按服务器架构换资产名：`amd64` / `arm64` / `arm` / `386` 等，用 `uname -m` 确认。
@@ -199,7 +263,7 @@ scp root@<服务器IP>:/opt/hysteria/client.yaml .
 `client.yaml` 长这样：
 
 ```yaml
-server: 1.2.3.4:443
+server: 1.2.3.4:8443
 auth: xxxxxxxx
 tls:
   sni: hy2.local
@@ -217,7 +281,7 @@ socks5:
 ### 用分享链接
 
 ```
-hysteria2://<auth>@<IP>:443/?sni=hy2.local&insecure=1&obfs=salamander&obfs-password=<pw>#hy2
+hysteria2://<auth>@<IP>:8443/?sni=hy2.local&insecure=1&obfs=salamander&obfs-password=<pw>#hy2
 ```
 
 可直接导入 Clash Verge Rev、Hiddify、NekoBox 等支持 hy2 的客户端。
@@ -229,7 +293,7 @@ proxies:
   - name: hy2
     type: hysteria2
     server: 1.2.3.4
-    port: 443
+    port: 8443
     password: xxxxxxxx
     sni: hy2.local
     skip-cert-verify: true
@@ -242,7 +306,7 @@ proxies:
 客户端日志出现下面这行才算成功：
 
 ```
-connected to server  {"addr": "1.2.3.4:443", "udpEnabled": true, ...}
+connected to server  {"addr": "1.2.3.4:8443", "udpEnabled": true, ...}
 ```
 
 只看到 `client mode` 而没有 `connected to server`，说明还没连上，按 [常见问题](#常见问题) 查。
@@ -516,6 +580,13 @@ masquerade:
 2. 混淆密码是否和服务端一致（不一致的表现就是超时）
 3. `run.sh status` 是否运行中
 4. `--host` 填的地址是否可达
+5. 这个端口本身是否被 VPS 提供方封禁——换 `8443` 或 `2053` 再试一次
+
+**VPS 不给我 443 端口怎么办**
+
+随便换一个 UDP 端口，`8443` 最好用，而且不需要 root（高位端口）。见 [端口怎么选](#端口怎么选)。
+
+注意 Cloudflare 支持的那批端口（8443 / 2053 / 2083…）是给 HTTPS/TCP 代理用的，**CF 不转发 UDP**，hy2 用不上 CF 的端口本身，只是这些端口号在网络上比较通畅。
 
 **日志没有 `server up and running`**
 
