@@ -5,7 +5,8 @@
 不编译任何东西，直接取官方静态二进制；把运行内存压进 64MB；崩溃自动拉起；顺带生成客户端配置。
 
 ```sh
-docker cp install.sh <容器>:/tmp/
+git clone https://github.com/dongjiahong/hysteria2-alpine.git
+docker cp hysteria2-alpine/install.sh <容器>:/tmp/
 docker exec -it <容器> sh /tmp/install.sh --port 443 --start
 ```
 
@@ -51,13 +52,25 @@ docker exec -it <容器> sh /tmp/install.sh --port 443 --start
 
 ## 安装
 
-### 1. 把脚本送进容器
+### 1. 获取脚本
+
+```sh
+git clone https://github.com/dongjiahong/hysteria2-alpine.git
+```
+
+只要脚本的话：
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/dongjiahong/hysteria2-alpine/main/install.sh
+```
+
+### 2. 把脚本送进容器
 
 ```sh
 docker cp install.sh <容器名>:/tmp/
 ```
 
-### 2. 运行
+### 3. 运行
 
 ```sh
 docker exec -it <容器名> sh /tmp/install.sh --port 443 --start
@@ -78,7 +91,7 @@ docker exec -it <容器名> sh /tmp/install.sh --port 443 --start
 
 密码也随时可以用 `run.sh show` 再查，不用怕丢。
 
-### 3. 参数
+### 4. 参数
 
 | 参数 | 默认 | 说明 |
 | :-- | :-- | :-- |
@@ -97,7 +110,7 @@ docker exec -it <容器名> sh /tmp/install.sh --port 443 --start
 
 环境变量 `APP_DIR` 可改安装目录（默认 `/opt/hysteria`），`HY_VERSION` 可指定版本。
 
-### 4. 安装目录
+### 5. 安装目录
 
 | 文件 | 作用 |
 | :-- | :-- |
@@ -110,7 +123,7 @@ docker exec -it <容器名> sh /tmp/install.sh --port 443 --start
 | `hysteria.log` | 日志，超过 5MB 自动滚动一次 |
 | `hysteria.pid` / `hysteria.child` | 守护进程 / 子进程 PID |
 
-### 5. 容器没出站网络怎么办
+### 6. 容器没出站网络怎么办
 
 下载失败时，在能上网的机器上取好二进制再送进去：
 
