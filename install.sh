@@ -250,10 +250,30 @@ else
     command -v openssl >/dev/null 2>&1 || {
         if command -v apk >/dev/null 2>&1; then
             say "缺少 openssl，尝试 apk add（可能要十几秒）..."
-            apk add --no-cache openssl >/dev/null 2>&1 || true
+            apk add --no-cache openssl > "$APP_DIR/apk-openssl.log" 2>&1 || true
         fi
     }
-    command -v openssl >/dev/null 2>&1 || die "没有 openssl，无法自签证书；请用 --cert/--key 提供"
+    if ! command -v openssl >/dev/null 2>&1; then
+        warn "无法安装 openssl，原因（末尾几行）:"
+        tail -n 3 "$APP_DIR/apk-openssl.log" 2>/dev/null | sed 's/^/      /' >&2
+        rm -f "$APP_DIR/apk-openssl.log"
+        cat >&2 <<EOF
+
+### 没有 openssl，无法自动生成自签证书。两条路，任选一条：
+
+  A) 在本地生成证书再传上去（推荐，不依赖容器软件源）：
+       openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \\
+         -keyout key.pem -out cert.pem -days 3650 \\
+         -subj "/CN=$SNI" -addext "subjectAltName=DNS:$SNI"
+       # 传到服务器后：
+       sh install.sh --port $PORT --cert /path/cert.pem --key /path/key.pem
+
+  B) 修好 apk 源后重试：
+       apk update          # 看报错，多半是网络或 /etc/apk/repositories
+EOF
+        exit 1
+    fi
+    rm -f "$APP_DIR/apk-openssl.log"
 
     SELF_SIGNED=1
     # ECDSA P-256：比 Ed25519 兼容性好（部分客户端 Chrome 指纹不支持 Ed25519）
@@ -492,7 +512,11 @@ case "${1:-}" in
         cat "$DIR/client-uri.txt" 2>/dev/null || true
         echo
         echo "--- 证书 pinSHA256 ---"
-        openssl x509 -in "$DIR/certs/cert.pem" -noout -fingerprint -sha256 2>/dev/null | awk -F= '{print $2}'
+        if command -v openssl >/dev/null 2>&1; then
+            openssl x509 -in "$DIR/certs/cert.pem" -noout -fingerprint -sha256 2>/dev/null | awk -F= '{print $2}'
+        else
+            echo "(本机没有 openssl，无法计算；客户端用 insecure: true)"
+        fi
         ;;
     check)
         # check 会真实绑定端口，服务在跑时必然冲突，先提醒再执行
@@ -549,9 +573,14 @@ server: $HOST:$PORT
 auth: $PASSWORD
 tls:
   sni: $SNI
-  insecure: true          # 自签证书；客户端支持 pinSHA256 的话改用下一行更强
+  insecure: true          # 自签证书；客户端支持 pinSHA256 的话用证书指纹代替
+EOF
+
+if [ -n "$PIN" ]; then
+    cat >> "$APP_DIR/client.yaml" <<EOF
   # pinSHA256: $PIN
 EOF
+fi
 
 if [ "$USE_OBFS" -eq 1 ]; then
     cat >> "$APP_DIR/client.yaml" <<EOF
@@ -590,7 +619,7 @@ cat <<EOF
 监听       : udp/$PORT
 认证密码   : $([ "$CRED_SHOW" -eq 1 ] && echo "$PASSWORD" || echo "见 config.yaml")
 $( if [ "$USE_OBFS" -eq 1 ]; then echo "混淆密码   : $([ "$CRED_SHOW" -eq 1 ] && echo "$OBFS_PASSWORD" || echo "见 config.yaml")"; else echo "混淆       : 已关闭"; fi )
-证书 pin   : $PIN
+$( if [ -n "$PIN" ]; then echo "证书 pin   : $PIN"; else echo "证书 pin   : (容器无 openssl，未计算；客户端用 insecure: true 即可)"; fi )
 
 启动 : $APP_DIR/run.sh start      (前台: $APP_DIR/run.sh run)
 状态 : $APP_DIR/run.sh status
