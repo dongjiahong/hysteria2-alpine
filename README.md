@@ -286,6 +286,7 @@ ln -sf /opt/hysteria/manage.sh /usr/local/bin/hy2
 | `manage.sh autostart` | 安装开机自启 |
 | `manage.sh no-autostart` | 移除开机自启 |
 | `manage.sh upgrade 2.13.0` | 换二进制，保留配置 |
+| `manage.sh set-dns https 1.1.1.1` | 设置服务端 DNS（解决 resolve error） |
 | `manage.sh start` / `stop` / `restart` / `status` / `log` | 进程管理 |
 
 ### 看状态
@@ -487,6 +488,56 @@ manage.sh start
 ---
 
 ## 排障
+
+### 日志怎么看
+
+服务端日志默认 `info` 级别。看到 WARN 先别忽略，要按 `error` 内容分类：
+
+| 日志里的 error | 含义 | 要不要处理 |
+| :-- | :-- | :-- |
+| `resolve error: lookup xxx on 10.91.0.1:53: no such host` | **服务端 DNS 解析不了这个域名** | **要**，见下一节 |
+| `resolve error: read udp ...->x.x.x.x:53: i/o timeout` | DNS 服务器不通 | **要**，换 resolver |
+| `readfrom tcp ...: Application error 0x100 (remote)` | 目标站或链路主动断开 | 偶发可忽略，持续出现才查 |
+| `client disconnected` | 正常断开 | 不用管 |
+| `TCP error ... connection refused` | 目标端口没开 / 被 RST | 视目标而定，多半是站点本身 |
+
+`resolve error` 是最常见的「看起来能用、其实某些站点打不开」的元凶：**YouTube、Google 系域名最容易中招**，因为服务端用的系统 DNS 经常是内网 DNS 或被污染的 DNS。
+
+### 修 resolve error
+
+先看当前用的是哪个 DNS：
+
+```sh
+manage.sh set-dns
+```
+
+如果显示 `使用系统 DNS` 且地址是个内网 IP（如 `10.91.0.1`、`127.0.0.11`），基本就是它的问题。换掉：
+
+```sh
+# 推荐：DoH，走 TCP 443，能绕过 DNS 污染
+manage.sh set-dns https 1.1.1.1
+
+# 或者 DoT（TCP 853）
+manage.sh set-dns tls 1.1.1.1
+
+# 或者明文 UDP（最快，但可能被污染）
+manage.sh set-dns udp 8.8.8.8
+
+# 恢复成系统 DNS
+manage.sh set-dns off
+```
+
+会自动写入 `config.yaml` 的 `resolver` 段并重启。**如果新配置起不来，脚本会自动回滚。**
+
+验证券商没拦住：
+
+```sh
+manage.sh log | grep resolve
+```
+
+不再出现新的 `resolve error` 就说明好了。
+
+> 为什么不用改 `/etc/resolv.conf`：容器里那个文件常被平台托管，重启会被覆盖。写在 hysteria 配置里更持久，也只影响 hy2 自己的解析。
 
 **客户端一直超时，服务端没有连接记录**
 

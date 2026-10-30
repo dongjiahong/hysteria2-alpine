@@ -568,6 +568,7 @@ cat > "$APP_DIR/manage.sh" <<'MANAGE'
 #   manage.sh autostart       安装开机自启
 #   manage.sh no-autostart    移除开机自启
 #   manage.sh upgrade [版本]   换二进制（保留配置）
+#   manage.sh set-dns ...     设置服务端 DNS（解决 resolve error）
 #   manage.sh start|stop|restart|status|log|run   委托给 run.sh
 set -u
 DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -585,6 +586,15 @@ rewrite() {   # rewrite <文件> [sed 参数...]
     f=$1; shift
     [ -f "$f" ] || return 1
     sed "$@" "$f" > "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f" || { rm -f "$f.tmp.$$"; return 1; }
+}
+
+# 删除一个顶层 YAML 块（含其缩进子项），用于重写 resolver
+strip_block() {   # strip_block <文件> <顶层键>
+    awk -v k="$2" '
+        $0 ~ "^" k ":" {skip=1; next}
+        skip && /^[^[:space:]#]/ {skip=0}
+        !skip {print}
+    ' "$1"
 }
 
 cfg_port() {
@@ -781,6 +791,88 @@ case "${1:-}" in
         done
         echo "已移除自启项"
         ;;
+    set-dns)
+        need_conf
+        typ=${2:-}
+        if [ -z "$typ" ]; then
+            echo "== 当前 resolver =="
+            if grep -q '^resolver:' "$CONF"; then
+                awk '/^resolver:/{f=1} f&&/^[^[:space:]#]/&&!/^resolver:/{f=0} f' "$CONF" | sed 's/^/  /'
+            else
+                echo "  (未配置，使用系统 DNS)"
+                grep -i '^nameserver' /etc/resolv.conf 2>/dev/null | sed 's/^/  系统: /'
+            fi
+            echo
+            echo "用法: manage.sh set-dns {https|tls|udp|tcp} <服务器IP> [SNI]"
+            echo "      manage.sh set-dns off      回退到系统 DNS"
+            exit 0
+        fi
+        cp -f "$CONF" "$CONF.bak.$(date +%s)"
+        strip_block "$CONF" resolver > "$CONF.tmp.$$" && mv -f "$CONF.tmp.$$" "$CONF" \
+            || { rm -f "$CONF.tmp.$$"; die "写入失败，已保留备份"; }
+        if [ "$typ" = "off" ]; then
+            "$R" restart >/dev/null 2>&1
+            "$R" status >/dev/null 2>&1 && echo "已移除 resolver，使用系统 DNS" \
+                || { echo "重启失败，看 manage.sh log" >&2; exit 1; }
+            exit 0
+        fi
+        case "$typ" in
+            https|tls|udp|tcp) : ;;
+            *) die "类型只支持 https / tls / udp / tcp / off" ;;
+        esac
+        srv=${3:-}
+        [ -n "$srv" ] || die "用法: manage.sh set-dns $typ <服务器IP> [SNI]"
+        case "$typ" in
+            https) defport=443 ;;
+            tls)   defport=853 ;;
+            *)     defport=53 ;;
+        esac
+        case "$srv" in
+            *:*) addr=$srv ;;
+            *)   addr="$srv:$defport" ;;
+        esac
+        sni=${4:-}
+        if [ -z "$sni" ]; then
+            case "${srv%%:*}" in
+                1.1.1.1|1.0.0.1) sni=cloudflare-dns.com ;;
+                8.8.8.8|8.8.4.4) sni=dns.google ;;
+                9.9.9.9)         sni=dns.quad9.net ;;
+                94.140.14.14)    sni=dns.adguard.com ;;
+            esac
+        fi
+        {
+            echo
+            echo "resolver:"
+            echo "  type: $typ"
+            echo "  $typ:"
+            echo "    addr: $addr"
+            case "$typ" in
+                https|tls)
+                    echo "    timeout: 10s"
+                    if [ -n "$sni" ]; then
+                        echo "    sni: $sni"
+                    else
+                        echo "    # 未知服务器，请自行补 sni，否则证书校验会失败"
+                    fi
+                    echo "    insecure: false"
+                    ;;
+                *) echo "    timeout: 4s" ;;
+            esac
+        } >> "$CONF"
+
+        "$R" restart >/dev/null 2>&1
+        sleep 2
+        if "$R" status >/dev/null 2>&1; then
+            echo "已设置 resolver: $typ $addr"
+            [ -n "$sni" ] && echo "  sni: $sni"
+            echo "用 manage.sh log 观察是否还有 resolve error"
+        else
+            echo "!! 服务没能起来，已回滚配置" >&2
+            cp -f "$(ls -t "$CONF".bak.* 2>/dev/null | head -1)" "$CONF" 2>/dev/null
+            "$R" restart >/dev/null 2>&1
+            exit 1
+        fi
+        ;;
     upgrade)
         ver=${2:-}
         [ -n "$ver" ] || die "用法: manage.sh upgrade <版本号>，例如 manage.sh upgrade 2.13.0"
@@ -805,7 +897,7 @@ case "${1:-}" in
         exec "$R" "$@"
         ;;
     *)
-        sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
 esac
