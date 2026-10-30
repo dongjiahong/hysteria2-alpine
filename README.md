@@ -72,7 +72,13 @@ wget -O /tmp/install.sh https://raw.githubusercontent.com/dongjiahong/hysteria2-
 curl -fsSL -o /tmp/install.sh https://raw.githubusercontent.com/dongjiahong/hysteria2-alpine/main/install.sh
 ```
 
-服务器连不上 GitHub，就在本地下好再传上去：
+`raw.githubusercontent.com` 在部分线路很慢或不通，换 jsDelivr 镜像：
+
+```sh
+wget -O /tmp/install.sh https://cdn.jsdelivr.net/gh/dongjiahong/hysteria2-alpine@main/install.sh
+```
+
+都连不上就在本地下好再传上去：
 
 ```sh
 # 本地执行
