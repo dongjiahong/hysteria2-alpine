@@ -233,8 +233,13 @@ say "3/6 准备证书"
 
 SELF_SIGNED=0
 if [ -n "$CERT_SRC" ]; then
-    cp -f "$CERT_SRC" "$APP_DIR/certs/cert.pem"
-    cp -f "$KEY_SRC"  "$APP_DIR/certs/key.pem"
+    # 源和目标可能是同一个文件（用户直接把 cert 放在 certs/ 下），cp 会返回 1
+    [ "$(readlink -f "$CERT_SRC" 2>/dev/null || printf '%s' "$CERT_SRC")" = \
+      "$(readlink -f "$APP_DIR/certs/cert.pem" 2>/dev/null || printf '%s' "$APP_DIR/certs/cert.pem")" ] \
+        || cp -f "$CERT_SRC" "$APP_DIR/certs/cert.pem"
+    [ "$(readlink -f "$KEY_SRC" 2>/dev/null || printf '%s' "$KEY_SRC")" = \
+      "$(readlink -f "$APP_DIR/certs/key.pem" 2>/dev/null || printf '%s' "$APP_DIR/certs/key.pem")" ] \
+        || cp -f "$KEY_SRC" "$APP_DIR/certs/key.pem"
     rm -f "$APP_DIR/certs/selfsigned"
     say "使用已有证书: $CERT_SRC"
 elif [ -f "$APP_DIR/certs/cert.pem" ] && [ -f "$APP_DIR/certs/key.pem" ] && [ "$FORCE" -eq 0 ]; then
@@ -243,7 +248,10 @@ elif [ -f "$APP_DIR/certs/cert.pem" ] && [ -f "$APP_DIR/certs/key.pem" ] && [ "$
     say "复用已有证书"
 else
     command -v openssl >/dev/null 2>&1 || {
-        command -v apk >/dev/null 2>&1 && apk add --no-cache openssl >/dev/null 2>&1
+        if command -v apk >/dev/null 2>&1; then
+            say "缺少 openssl，尝试 apk add（可能要十几秒）..."
+            apk add --no-cache openssl >/dev/null 2>&1 || true
+        fi
     }
     command -v openssl >/dev/null 2>&1 || die "没有 openssl，无法自签证书；请用 --cert/--key 提供"
 
