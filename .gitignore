@@ -10,3 +10,10 @@
 /hysteria.log*
 /*.pid
 /*.child
+/clash.yaml
+
+# 本地临时脚本与凭据，切勿提交
+/x.sh
+*.pem
+*.key
+*xray*backup*

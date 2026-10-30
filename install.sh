@@ -286,8 +286,18 @@ EOF
     say "已生成自签证书（CN=${SNI}，10 年）"
 fi
 
-PIN=$(openssl x509 -in "$APP_DIR/certs/cert.pem" -noout -fingerprint -sha256 2>/dev/null \
-      | awk -F= '{print $2}' | tr -d ':' || true)
+# 证书指纹：纯 shell 从 PEM 解出 DER 再 sha256，不依赖 openssl
+# （容器里常常没有 openssl，但 base64/sha256sum 一定有）
+cert_fingerprint() {
+    sed -n '/BEGIN CERTIFICATE/,/END CERTIFICATE/p' "$1" 2>/dev/null \
+        | grep -v -- '-----' | tr -d '\n' | base64 -d 2>/dev/null \
+        | sha256sum 2>/dev/null | awk '{print toupper($1)}' \
+        | sed 's/\(..\)/\1:/g; s/:$//'
+}
+
+PIN=$(cert_fingerprint "$APP_DIR/certs/cert.pem")
+[ -n "$PIN" ] || PIN=$(openssl x509 -in "$APP_DIR/certs/cert.pem" -noout -fingerprint -sha256 2>/dev/null \
+      | awk -F= '{print $2}' || true)
 
 # ---------------------------------------------------------------- 4. 配置
 say "4/6 生成服务端配置"
@@ -512,11 +522,11 @@ case "${1:-}" in
         cat "$DIR/client-uri.txt" 2>/dev/null || true
         echo
         echo "--- 证书 pinSHA256 ---"
-        if command -v openssl >/dev/null 2>&1; then
-            openssl x509 -in "$DIR/certs/cert.pem" -noout -fingerprint -sha256 2>/dev/null | awk -F= '{print $2}'
-        else
-            echo "(本机没有 openssl，无法计算；客户端用 insecure: true)"
-        fi
+        # 纯 shell：PEM 解出 DER 再 sha256，无需 openssl
+        sed -n '/BEGIN CERTIFICATE/,/END CERTIFICATE/p' "$DIR/certs/cert.pem" 2>/dev/null \
+            | grep -v -- '-----' | tr -d '\n' | base64 -d 2>/dev/null \
+            | sha256sum 2>/dev/null | awk '{print toupper($1)}' \
+            | sed 's/\(..\)/\1:/g; s/:$//'
         ;;
     check)
         # check 会真实绑定端口，服务在跑时必然冲突，先提醒再执行
@@ -544,6 +554,264 @@ esac
 RUNSH
 
 chmod 0755 "$APP_DIR/run.sh"
+
+# ---------------------------------------------------------------- 5b. manage.sh
+# 运维入口：改端口、换密码、导出 Clash 配置、自检、自启、升级
+cat > "$APP_DIR/manage.sh" <<'MANAGE'
+#!/bin/sh
+# Hysteria 2 运维脚本（BusyBox / POSIX sh）
+#   manage.sh show            客户端信息（含 Clash 片段）
+#   manage.sh set-port 8443   改监听端口，同步客户端配置
+#   manage.sh set-pass        重新生成认证密码与混淆密码
+#   manage.sh export          导出可直接导入 Clash Verge 的完整配置
+#   manage.sh doctor          自检（进程/监听/内存/磁盘）
+#   manage.sh autostart       安装开机自启
+#   manage.sh no-autostart    移除开机自启
+#   manage.sh upgrade [版本]   换二进制（保留配置）
+#   manage.sh start|stop|restart|status|log|run   委托给 run.sh
+set -u
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+CONF="$DIR/config.yaml"
+CLIENT="$DIR/client.yaml"
+URI="$DIR/client-uri.txt"
+R="$DIR/run.sh"
+
+die() { printf '### %s\n' "$*" >&2; exit 1; }
+need_conf() { [ -f "$CONF" ] || die "找不到 $CONF，先跑 install.sh"; }
+
+# 就地改写：用临时文件替代 sed -i
+# （BSD sed -i 需要额外参数，busybox 不需要，这里统一绕开）
+rewrite() {   # rewrite <文件> [sed 参数...]
+    f=$1; shift
+    [ -f "$f" ] || return 1
+    sed "$@" "$f" > "$f.tmp.$$" && mv -f "$f.tmp.$$" "$f" || { rm -f "$f.tmp.$$"; return 1; }
+}
+
+cfg_port() {
+    awk '/^listen:/{s=$0; sub(/^[^:]*:/,"",s); gsub(/[^0-9]/,"",s); print s; exit}' "$CONF" 2>/dev/null
+}
+cfg_auth() {
+    awk '/^auth:/{f=1;next} /^[^ #]/{f=0} f&&/^[[:space:]]+password:/{print $2; exit}' "$CONF" 2>/dev/null
+}
+cfg_obfs() {
+    awk '/^obfs:/{f=1;next} /^[^ #]/{f=0} f&&/^[[:space:]]+password:/{print $2; exit}' "$CONF" 2>/dev/null
+}
+cli_host() {
+    awk '/^server:/{s=$2; sub(/:[0-9]+$/,"",s); print s; exit}' "$CLIENT" 2>/dev/null
+}
+cli_sni() {
+    awk '/^[[:space:]]+sni:/{print $2; exit}' "$CLIENT" 2>/dev/null
+}
+
+# 纯 shell 证书指纹：PEM -> DER -> sha256
+fingerprint() {
+    sed -n '/BEGIN CERTIFICATE/,/END CERTIFICATE/p' "$DIR/certs/cert.pem" 2>/dev/null \
+        | grep -v -- '-----' | tr -d '\n' | base64 -d 2>/dev/null \
+        | sha256sum 2>/dev/null | awk '{print toupper($1)}' \
+        | sed 's/\(..\)/\1:/g; s/:$//'
+}
+
+rebuild_uri() {
+    h=$(cli_host); s=$(cli_sni); p=$(cfg_port); a=$(cfg_auth); o=$(cfg_obfs)
+    [ -n "$h" ] && [ -n "$p" ] && [ -n "$a" ] || return 0
+    u="hysteria2://$a@$h:$p/?sni=$s&insecure=1"
+    [ -n "$o" ] && u="$u&obfs=salamander&obfs-password=$o"
+    printf '%s#hy2-%s\n' "$u" "$h" > "$URI"
+    chmod 600 "$URI" 2>/dev/null
+}
+
+write_clash() {
+    h=$(cli_host); s=$(cli_sni); p=$(cfg_port); a=$(cfg_auth); o=$(cfg_obfs)
+    fp=$(fingerprint)
+    cat <<EOF
+# 由 manage.sh export 生成，可直接另存为 .yaml 导入 Clash Verge
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+proxies:
+  - name: hy2
+    type: hysteria2
+    server: $h
+    port: $p
+    password: $a
+    sni: $s
+    skip-cert-verify: true
+    alpn:
+      - h3
+EOF
+    [ -n "$fp" ] && printf '    fingerprint: %s\n' "$fp"
+    if [ -n "$o" ]; then
+        printf '    obfs: salamander\n    obfs-password: %s\n' "$o"
+    fi
+    cat <<'EOF'
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - hy2
+      - DIRECT
+rules:
+  - GEOIP,CN,DIRECT
+  - MATCH,PROXY
+EOF
+}
+
+case "${1:-}" in
+    show)
+        echo "--- 客户端配置 ---"
+        cat "$CLIENT" 2>/dev/null || echo "(没有 $CLIENT)"
+        echo
+        echo "--- 分享链接 ---"
+        rebuild_uri; cat "$URI" 2>/dev/null
+        echo
+        echo "--- 证书指纹 ---"
+        fingerprint
+        ;;
+    export)
+        need_conf
+        out="$DIR/clash.yaml"
+        write_clash > "$out"
+        chmod 600 "$out"
+        echo "已生成 $out"
+        echo "用法：Clash Verge -> 配置 -> 新建 -> 本地文件，选这个文件"
+        echo
+        write_clash
+        ;;
+    set-port)
+        need_conf
+        [ -n "${2:-}" ] || die "用法: manage.sh set-port <端口>"
+        printf '%s' "$2" | grep -qE '^[0-9]+$' || die "端口必须是数字"
+        [ "$2" -ge 1 ] && [ "$2" -le 65535 ] || die "端口范围 1-65535"
+        old=$(cfg_port)
+        cp -f "$CONF" "$CONF.bak.$(date +%s)"
+        rewrite "$CONF" "s/^listen: .*/listen: :$2/" || die "写入失败，已保留备份"
+        grep -q "^listen: :$2" "$CONF" || die "写入失败，已保留备份"
+        if [ -f "$CLIENT" ]; then
+            cp -f "$CLIENT" "$CLIENT.bak.$(date +%s)"
+            rewrite "$CLIENT" "s/^server: \(.*\):[0-9]*\$/server: \1:$2/"
+        fi
+        rebuild_uri
+        echo "端口 $old -> $2"
+        echo "!! 记得：面板/安全组放行 UDP $2，而不是 $old"
+        "$R" restart 2>/dev/null || echo "(服务未在运行，用 manage.sh start 启动)"
+        ;;
+    set-pass)
+        need_conf
+        a=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24)
+        o=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 24)
+        cp -f "$CONF" "$CONF.bak.$(date +%s)"
+        rewrite "$CONF" "s/^  password: .*/  password: $a/" || die "写入失败，已保留备份"
+        if grep -q '^obfs:' "$CONF"; then
+            rewrite "$CONF" "s/^    password: .*/    password: $o/"
+        else
+            o=""
+        fi
+        if [ -f "$CLIENT" ]; then
+            rewrite "$CLIENT" "s/^auth: .*/auth: $a/"
+            [ -n "$o" ] && rewrite "$CLIENT" "/^obfs:/,/^[^ ]/ s/^[[:space:]]*password: .*/    password: $o/"
+            rebuild_uri
+        fi
+        echo "新认证密码 : $a"
+        [ -n "$o" ] && echo "新混淆密码 : $o"
+        echo "客户端需重新导入：manage.sh show 查看"
+        "$R" restart 2>/dev/null || true
+        ;;
+    doctor)
+        need_conf
+        echo "== 进程 =="
+        "$R" status 2>/dev/null | sed 's/^/  /' || echo "  未运行"
+        p=$(cfg_port)
+        if [ -n "$p" ]; then
+            hex=$(printf '%04X' "$p")
+            echo "== 监听 udp/$p =="
+            if cat /proc/net/udp /proc/net/udp6 2>/dev/null | awk -v h=":$hex" 'index($2,h)>0 {f=1} END{exit !f}'; then
+                echo "  已监听"
+            else
+                echo "  未监听！(服务没起，或绑定失败)"
+            fi
+        fi
+        echo "== 内存 =="
+        found=0
+        for f in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes; do
+            [ -r "$f" ] && { echo "  上限: $(cat "$f") 字节"; found=1; break; }
+        done
+        [ "$found" -eq 0 ] && echo "  (无 cgroup 限制信息)"
+        echo "== 磁盘 =="
+        df -h / 2>/dev/null | tail -1 | awk '{print "  可用 " $4}'
+        echo "== 证书 =="
+        [ -f "$DIR/certs/cert.pem" ] && echo "  cert.pem $(wc -c < "$DIR/certs/cert.pem") 字节" || echo "  缺失！"
+        [ -f "$DIR/certs/key.pem" ] && echo "  key.pem  $(wc -c < "$DIR/certs/key.pem") 字节" || echo "  缺失！"
+        echo "== 指纹 =="
+        fingerprint | sed 's/^/  /'
+        ;;
+    autostart)
+        if command -v rc-update >/dev/null 2>&1 && [ -d /etc/local.d ]; then
+            printf '#!/bin/sh\n%s/run.sh start\n' "$DIR" > /etc/local.d/hysteria.start
+            chmod +x /etc/local.d/hysteria.start
+            rc-update add local default 2>/dev/null
+            echo "已用 OpenRC 配置自启 (/etc/local.d/hysteria.start)"
+        elif [ -d /etc/crontabs ] || [ -d /var/spool/cron/crontabs ]; then
+            if [ -d /etc/crontabs ]; then f=/etc/crontabs/root; else f=/var/spool/cron/crontabs/root; fi
+            mkdir -p "$(dirname "$f")"
+            grep -qF "$DIR/run.sh" "$f" 2>/dev/null && { echo "已存在自启项"; exit 0; }
+            echo "* * * * * $DIR/run.sh status >/dev/null 2>&1 || $DIR/run.sh start" >> "$f"
+            if command -v rc-service >/dev/null 2>&1 && rc-service crond start 2>/dev/null; then
+                :
+            elif command -v crond >/dev/null 2>&1; then
+                crond -b 2>/dev/null || true
+            else
+                echo "!! 本机没有 crond，自启项已写入但不会执行。" >&2
+                echo "   装一个：apk add busybox-initscripts 或 apk add cronie" >&2
+                exit 1
+            fi
+            echo "已用 cron 看门狗配置自启 ($f)，每分钟检查一次"
+        else
+            echo "没有 OpenRC 也没有 crontabs，无法自动配置。" >&2
+            echo "请让提供方在容器启动命令里加一行：$DIR/run.sh start" >&2
+            exit 1
+        fi
+        ;;
+    no-autostart)
+        rm -f /etc/local.d/hysteria.start
+        for f in /etc/crontabs/root /var/spool/cron/crontabs/root; do
+            if [ -f "$f" ] && grep -qF "$DIR/run.sh" "$f"; then
+                grep -vF "$DIR/run.sh" "$f" > "$f.tmp" && mv -f "$f.tmp" "$f"
+            fi
+        done
+        echo "已移除自启项"
+        ;;
+    upgrade)
+        ver=${2:-}
+        [ -n "$ver" ] || die "用法: manage.sh upgrade <版本号>，例如 manage.sh upgrade 2.13.0"
+        case "$(uname -m)" in
+            x86_64|amd64) a=amd64 ;; aarch64|arm64) a=arm64 ;;
+            armv7l|armv7) a=arm ;; *) die "未知架构" ;;
+        esac
+        url="https://github.com/HyNetworks/hysteria/releases/download/app/v$ver/hysteria-linux-$a"
+        echo "下载 $url"
+        tmp="$DIR/.hysteria.new"
+        if command -v wget >/dev/null 2>&1; then wget -q -O "$tmp" "$url"; else curl -fsSL -o "$tmp" "$url"; fi
+        [ -s "$tmp" ] || die "下载失败"
+        chmod 755 "$tmp"
+        "$tmp" version >/dev/null 2>&1 || die "新二进制无法运行，已放弃"
+        cp -f "$DIR/hysteria" "$DIR/hysteria.bak" 2>/dev/null
+        "$R" stop 2>/dev/null
+        mv -f "$tmp" "$DIR/hysteria"
+        "$R" start
+        echo "已升级到 $ver（旧版备份为 hysteria.bak）"
+        ;;
+    start|stop|restart|status|log|run|check)
+        exec "$R" "$@"
+        ;;
+    *)
+        sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+        exit 2
+        ;;
+esac
+MANAGE
+
+chmod 0755 "$APP_DIR/manage.sh"
 
 # ---------------------------------------------------------------- 6. 客户端配置
 say "6/6 生成客户端配置"
@@ -619,13 +887,19 @@ cat <<EOF
 监听       : udp/$PORT
 认证密码   : $([ "$CRED_SHOW" -eq 1 ] && echo "$PASSWORD" || echo "见 config.yaml")
 $( if [ "$USE_OBFS" -eq 1 ]; then echo "混淆密码   : $([ "$CRED_SHOW" -eq 1 ] && echo "$OBFS_PASSWORD" || echo "见 config.yaml")"; else echo "混淆       : 已关闭"; fi )
-$( if [ -n "$PIN" ]; then echo "证书 pin   : $PIN"; else echo "证书 pin   : (容器无 openssl，未计算；客户端用 insecure: true 即可)"; fi )
+$( if [ -n "$PIN" ]; then echo "证书 pin   : $PIN"; else echo "证书 pin   : (未计算；客户端用 insecure: true)"; fi )
 
-启动 : $APP_DIR/run.sh start      (前台: $APP_DIR/run.sh run)
-状态 : $APP_DIR/run.sh status
-日志 : $APP_DIR/run.sh log
-客户端: $APP_DIR/run.sh show      或 scp $APP_DIR/client.yaml .
+常用命令（都在 /opt/hysteria 下）：
+  manage.sh show          查看客户端配置 + 链接 + 指纹
+  manage.sh export        生成可直接导入 Clash Verge 的配置
+  manage.sh set-port 8443 改端口（自动同步客户端配置）
+  manage.sh set-pass      换密码
+  manage.sh doctor        自检
+  manage.sh autostart     配置开机自启
+  manage.sh start|stop|restart|status|log
+
+快捷入口：ln -sf $APP_DIR/manage.sh /usr/local/bin/hy2 && hy2 show
 ==========================================
 EOF
 
-[ "$DO_START" -eq 1 ] || say "还没启动：确认防火墙/安全组放行了 udp/$PORT 后执行 run.sh start"
+[ "$DO_START" -eq 1 ] || say "还没启动：确认防火墙/安全组放行了 udp/$PORT 后执行 $APP_DIR/manage.sh start"
